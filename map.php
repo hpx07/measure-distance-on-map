@@ -1,0 +1,293 @@
+<?php echo '<?xml version="1.0" encoding="UTF-8"?>'; ?>
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Product Coverage Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    #map { height: 100vh; }
+
+    /* Measure control */
+    .leaflet-control-measure.leaflet-bar a {
+      background: #fff;
+      color: #333;
+      display: block;
+      text-align: center;
+      text-decoration: none;
+      line-height: 28px;
+      width: 34px;
+      height: 34px;
+      font-size: 18px;
+      border-bottom: 1px solid #ccc;
+      cursor: pointer;
+      user-select: none;
+    }
+    .leaflet-control-measure.leaflet-bar a:last-child { border-bottom: none; }
+    .leaflet-control-measure a.active { background: #d4edda; }
+
+    /* Info panel */
+    .measure-info {
+      position: absolute;
+      right: 12px;
+      bottom: 12px;
+      background: #fff;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+      padding: 10px 12px;
+      max-width: 360px;
+      max-height: 45vh;
+      overflow: auto;
+      font: 14px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+      z-index: 1000;
+    }
+    .measure-info h4 { margin: 0 0 8px 0; font-size: 16px; }
+    .measure-info .muted { color: #666; }
+    .measure-info table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 13px; }
+    .measure-info th, .measure-info td { border-bottom: 1px dashed #eee; padding: 4px 2px; text-align: left; white-space: nowrap; }
+    .measure-info tfoot td { font-weight: 600; border-top: 1px solid #ddd; border-bottom: none; }
+
+    /* Measurement numbered markers */
+    .measure-point {
+      background: #e63946;
+      color: #fff;
+      width: 22px;
+      height: 22px;
+      line-height: 22px;
+      text-align: center;
+      border-radius: 50%;
+      border: 2px solid #fff;
+      box-shadow: 0 1px 6px rgba(0,0,0,.2);
+      font-weight: 600;
+    }
+
+    /* Make coverage features pointer when hoverable */
+    .leaflet-interactive { cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div id="measureInfo" class="measure-info" aria-live="polite">
+    <h4>Distance Measure</h4>
+    <div class="muted">Click <b>📏</b> to start measuring. Click two or more points (map or highlighted locations). Press <b>✔</b> to finish or <b>🗑</b> to clear. Double-click also finishes.</div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    // Initialize map
+    const map = L.map('map').setView([30.7333, 76.7794], 7);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(map);
+
+    const measureLayer = L.layerGroup().addTo(map);
+
+    const locations = [
+      { name: 'Chandigarh', lat: 15.4647458, lng: 73.9717797, radius: 150000 }
+    ];
+
+    const locationFeatures = [];
+
+    function createLocationFeature(loc) {
+      const circle = L.circle([loc.lat, loc.lng], {
+        radius: loc.radius,
+        color: "#1687f5",
+        fillColor: "#5aaafa3d",
+        fillOpacity: 0.4,
+        weight: 1.5
+      }).addTo(map).bindPopup(`${loc.name} - Coverage (${(loc.radius/1000)} km)`);
+
+      const marker = L.marker([loc.lat, loc.lng]).addTo(map).bindPopup(`${loc.name} (Center)`);
+
+      circle.on('mouseover', function() {
+        circle.setStyle({ color: 'green', fillColor: '#fac45fa9', fillOpacity: 0.6 });
+        map.getContainer().style.cursor = 'pointer';
+      });
+      circle.on('mouseout', function() {
+        circle.setStyle({ color: '#1687f5', fillColor: '#5aaafa3d', fillOpacity: 0.4 });
+        map.getContainer().style.cursor = '';
+      });
+
+      // allow measurement clicks
+      circle.on('click', function(e) {
+        if (measureState.active) addPoint(e.latlng);
+        else circle.openPopup();
+      });
+      marker.on('click', function(e) {
+        if (measureState.active) addPoint(marker.getLatLng());
+        else marker.openPopup();
+      });
+
+      locationFeatures.push({ circle, marker, loc });
+    }
+
+    locations.forEach(createLocationFeature);
+
+    // ---------------- Measurement Logic ----------------
+    const measureState = {
+      active: false,
+      points: [],
+      pointMarkers: [],
+      segments: [],
+      totalKm: 0,
+      polyline: null,
+      ghostLine: null
+    };
+
+    function km(meters) { return meters / 1000; }
+
+    function updateInfoPanel() {
+      const panel = document.getElementById('measureInfo');
+      if (measureState.points.length === 0) {
+        panel.innerHTML = `
+          <h4>Distance Measure</h4>
+          <div class="muted">Click <b>📏</b> to start measuring. Click two or more points (map or highlighted locations). Press <b>✔</b> to finish or <b>🗑</b> to clear. Double-click also finishes.</div>
+        `;
+        return;
+      }
+
+      let rows = '';
+      for (let i = 0; i < measureState.segments.length; i++) {
+        rows += `<tr><td>Segment ${i+1}</td><td>${measureState.segments[i].toFixed(2)} km</td></tr>`;
+      }
+
+      panel.innerHTML = `
+        <h4>Distance Measure</h4>
+        <div><b>Points:</b> ${measureState.points.length}</div>
+        <table>
+          <thead><tr><th>Leg</th><th>Distance</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="2" class="muted">Add more points…</td></tr>'}</tbody>
+          <tfoot><tr><td>Total</td><td>${measureState.totalKm.toFixed(2)} km</td></tr></tfoot>
+        </table>
+        <div class="muted" style="margin-top:6px;">Tip: Double-click to finish. Press Esc or 🗑 to clear.</div>
+      `;
+    }
+
+    function addPoint(latlng) {
+      const idx = measureState.points.length + 1;
+      const marker = L.marker(latlng, {
+        icon: L.divIcon({ className: 'measure-point', html: idx, iconSize: [22,22], iconAnchor: [11,11] })
+      }).addTo(measureLayer);
+      measureState.pointMarkers.push(marker);
+
+      if (measureState.points.length === 0) {
+        measureState.points.push(latlng);
+        measureState.polyline = L.polyline([latlng], { color: '#e63946', weight: 3 }).addTo(measureLayer);
+      } else {
+        const last = measureState.points[measureState.points.length - 1];
+        const distKm = km(map.distance(last, latlng));
+        measureState.segments.push(distKm);
+        measureState.totalKm += distKm;
+        measureState.points.push(latlng);
+
+        const latlngs = measureState.polyline.getLatLngs();
+        latlngs.push(latlng);
+        measureState.polyline.setLatLngs(latlngs);
+      }
+
+      updateInfoPanel();
+    }
+
+    map.on('mousemove', function(e) {
+      if (!measureState.active || measureState.points.length === 0) return;
+      const last = measureState.points[measureState.points.length - 1];
+      const temp = [last, e.latlng];
+      if (!measureState.ghostLine) {
+        measureState.ghostLine = L.polyline(temp, { color: '#e63946', dashArray: '6,6', weight: 2, opacity: 0.8 }).addTo(measureLayer);
+      } else {
+        measureState.ghostLine.setLatLngs(temp);
+      }
+    });
+
+    map.on('click', function(e) {
+      if (!measureState.active) return;
+      addPoint(e.latlng);
+    });
+
+    map.on('dblclick', function() {
+      if (measureState.active) finishMeasure();
+    });
+
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') clearMeasure();
+    });
+
+    function startMeasure() {
+      clearMeasure();
+      measureState.active = true;
+      updateInfoPanel();
+    }
+    function finishMeasure() {
+      measureState.active = false;
+      if (measureState.ghostLine) { measureLayer.removeLayer(measureState.ghostLine); measureState.ghostLine = null; }
+      updateInfoPanel();
+    }
+    function clearMeasure() {
+      measureState.active = false;
+      measureState.points = [];
+      measureState.segments = [];
+      measureState.totalKm = 0;
+      measureState.pointMarkers.forEach(m => measureLayer.removeLayer(m));
+      measureState.pointMarkers = [];
+      if (measureState.polyline) { measureLayer.removeLayer(measureState.polyline); measureState.polyline = null; }
+      if (measureState.ghostLine) { measureLayer.removeLayer(measureState.ghostLine); measureState.ghostLine = null; }
+      updateInfoPanel();
+    }
+
+    const MeasureControl = L.Control.extend({
+      options: { position: 'topright' },
+      onAdd: function () {
+        const container = L.DomUtil.create('div', 'leaflet-control-measure leaflet-bar');
+
+        const btnToggle = L.DomUtil.create('a', '', container);
+        btnToggle.href = '#'; btnToggle.title = 'Start/Stop Measure'; btnToggle.textContent = '📏';
+
+        const btnFinish = L.DomUtil.create('a', '', container);
+        btnFinish.href = '#'; btnFinish.title = 'Finish (lock)'; btnFinish.textContent = '✔';
+
+        const btnClear = L.DomUtil.create('a', '', container);
+        btnClear.href = '#'; btnClear.title = 'Clear measurement'; btnClear.textContent = '🗑';
+
+        function refreshToggle() {
+          if (measureState.active) btnToggle.classList.add('active');
+          else btnToggle.classList.remove('active');
+        }
+        refreshToggle();
+
+        L.DomEvent.on(btnToggle, 'click', (ev) => {
+          L.DomEvent.stop(ev);
+          if (measureState.active) finishMeasure(); else startMeasure();
+          refreshToggle();
+        });
+        L.DomEvent.on(btnFinish, 'click', (ev) => { L.DomEvent.stop(ev); finishMeasure(); refreshToggle(); });
+        L.DomEvent.on(btnClear, 'click', (ev) => { L.DomEvent.stop(ev); clearMeasure(); refreshToggle(); });
+
+        L.DomEvent.disableClickPropagation(container);
+        L.DomEvent.disableScrollPropagation(container);
+        return container;
+      }
+    });
+    map.addControl(new MeasureControl());
+
+    // measuring logic ends here ----------------
+
+        // --- India States Outline Layer ---
+    // Public GeoJSON for India states (TopoJSON converted to GeoJSON)
+    fetch("https://raw.githubusercontent.com/geohacker/india/master/state/india_telengana.geojson")
+  .then(res => res.json())
+  .then(data => {
+    L.geoJSON(data, {
+      style: {
+        color: "#ff0000ff",        // outline color
+        weight: 1,            // border thickness
+        fillColor: "#f5f5f5", // light gray fill
+        fillOpacity: 0.3      // semi-transparent
+      },
+      interactive: false // disable interactivity
+    }).addTo(map).bringToBack();
+  });
+
+    updateInfoPanel();
+  </script>
+</body>
+</html>
